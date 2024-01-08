@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sets up ALB
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+
+  DefaultAcmCertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:012345678901:certificate/abcdef12-3456-7890-abcd-efghijklmnop
+
+Resources:
+  #========== Security Groups
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        "Fn::ImportValue": !Sub ${Environment}VPC
+      GroupName: !Sub ${Environment}AllowWebServer
+      GroupDescription: Enables access to all IPs to port 80 and 443
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  #========== Private Application Load Balancer
+  PrivateAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub private-alb-${Environment}
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - "Fn::ImportValue": !Sub ${Environment}PublicSubnet1
+        - "Fn::ImportValue": !Sub ${Environment}PublicSubnet2
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+        - "Fn::ImportValue": !Sub ${Environment}InternalAccessSecurityGroup
+
+  PrivateAlbDefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub private-tg-${Environment}-default
+      VpcId:
+        "Fn::ImportValue": !Sub ${Environment}VPC
+      Port: 80
+      Protocol: HTTP
+      Matcher:
+        HttpCode: "200,301,404"
+      HealthCheckIntervalSeconds: 300
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 150
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 10
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 60
+
+  PrivateAlbListenerForHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PrivateAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PrivateAlbDefaultTargetGroup
+  PrivateAlbListenerForHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PrivateAlb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref DefaultAcmCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PrivateAlbDefaultTargetGroup
+
+Outputs:
+  LoadBalancerSecurityGroup:
+    Value: !Ref LoadBalancerSecurityGroup
+    Export:
+      Name: !Sub ${Environment}LoadBalancerSecurityGroup
+
+  BackendAlbDefaultTargetGroup:
+    Value: !Ref PrivateAlbDefaultTargetGroup
+    Export:
+      Name: !Sub ${Environment}BackendAlbDefaultTargetGroup
+
+  BackendAlbDns:
+    Value: !GetAtt PrivateAlb.DNSName
+    Export:
+      Name: !Sub ${Environment}BackendAlbDns
+
+  BackendAlbFullName:
+    Value: !GetAtt PrivateAlb.LoadBalancerFullName
+    Export:
+      Name: !Sub ${Environment}BackendAlbFullName
+
+  BackendAlbListenerForHttp:
+    Value: !Ref PrivateAlbListenerForHttp
+    Export:
+      Name: !Sub ${Environment}BackendAlbListenerForHttp
+
+  BackendAlbListenerForHttps:
+    Value: !Ref PrivateAlbListenerForHttps
+    Export:
+      Name: !Sub ${Environment}BackendAlbListenerForHttps
+
+  PrivateAlb:
+    Value: !Ref PrivateAlb
+    Export:
+      Name: !Sub ${Environment}PrivateAlb

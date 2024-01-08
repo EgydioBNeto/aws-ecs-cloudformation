@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sets Up ECS Service
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+
+  ClusterName:
+    Type: String
+    Default: egydio-prod-cluster
+
+  EcsTasksNumber:
+    Type: String
+    Default: 1
+
+  ContainerPort:
+    Type: String
+    Default: 8081
+
+  ContainerVirtualCPUs:
+    Type: String
+    Default: 512
+
+  ContainerMemoryMin:
+    Type: String
+    Default: 256
+
+  ContainerMemoryMax:
+    Type: String
+    Default: 512
+
+  DockerImageVersion:
+    Type: String
+    Default: latest
+
+  AlbHealthCheckStartPeriod:
+    Type: String
+    Default: 60
+
+  ContainerNetworkMode:
+    Type: String
+    Default: bridge
+
+  TypeProject:
+    Type: String
+    Default: microservices
+
+  LocalImageName:
+    Type: String
+    Default: egydio-prod-registry
+
+  EcsTypePlacementStrategy:
+    Type: String
+    Default: spread
+
+  EcsFieldPlacementStrategy:
+    Type: String
+    Default: instanceId
+
+  DomainName:
+    Type: String
+    Default: egydio.domain.cloud
+
+  EcsTasksMax:
+    Type: String
+    Default: 2
+
+  EcsTasksMin:
+    Type: String
+    Default: 1
+
+  EcsScaleOutRate:
+    Type: String
+    Default: 300
+
+  EcsScaleInRate:
+    Type: String
+    Default: 300
+
+  EcsScaleOutAdjustment:
+    Type: String
+    Default: 300
+
+  EcsScaleInAdjustment:
+    Type: String
+    Default: 300
+
+  Secrets:
+    Type: String
+    Default: prod/egydio/example
+
+Conditions:
+  hasOnlyOneTask: !Equals [!Ref EcsTasksNumber, "1"]
+  containerHasMemoryLimit: !Not [!Equals [!Ref ContainerMemoryMax, "LIMITLESS"]]
+  hasServiceDiscovery: !Equals [!Ref ContainerNetworkMode, "awsvpc"]
+
+Resources:
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckPath: /
+      VpcId:
+        "Fn::ImportValue": !Sub ${Environment}VPC
+      Protocol: HTTP
+      Matcher:
+        HttpCode: "200,301,404"
+      Port: 80
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+        - Key: stickiness.enabled
+          Value: true
+
+  Task:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${TypeProject}__${ClusterName}
+      NetworkMode: !Ref ContainerNetworkMode
+      CPU: !Ref ContainerVirtualCPUs
+      Memory: !Ref ContainerMemoryMax
+      ContainerDefinitions:
+        - Name: !Sub Application__${TypeProject}__${ClusterName}
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${LocalImageName}:${DockerImageVersion}
+
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !If [hasServiceDiscovery, !Ref ContainerPort, 0]
+          MemoryReservation: !Ref ContainerMemoryMin
+          Memory: !Ref ContainerMemoryMax
+          Cpu: !Ref ContainerVirtualCPUs
+          Hostname: !Sub Application.${ClusterName}
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub /ecs-cluster/${ClusterName}
+              awslogs-stream-prefix: /ecs-task-output
+              awslogs-region: !Ref AWS::Region
+          Environment:
+            - Name: MONGODB_DB
+              Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_DB}}"
+            - Name: MONGODB_URI
+              Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_URI}}"
+            - Name: MONGODB_USER
+              Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_USER}}"
+            - Name: MONGODB_PASS
+              Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_PASS}}"
+
+  Service:
+    DependsOn: TargetGroup
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${ClusterName}_${TypeProject}_service_ecs
+      Cluster:
+        "Fn::ImportValue": !Sub ${ClusterName}ECSCluster
+      Role: !If
+        - hasServiceDiscovery
+        - !Ref AWS::NoValue
+        - "Fn::ImportValue": !Sub ${ClusterName}ECSRoleArn
+      TaskDefinition: !Ref Task
+      DesiredCount: !Ref EcsTasksNumber
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100 #!If [hasOnlyOneTask, 0, 50]
+        MaximumPercent: 200
+      LoadBalancers:
+        - ContainerName: !Sub Application__${TypeProject}__${ClusterName}
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+      PlacementStrategies:
+        - Field: instanceId
+          Type: spread
+      HealthCheckGracePeriodSeconds: !Ref AlbHealthCheckStartPeriod
+      NetworkConfiguration: !If
+        - hasServiceDiscovery
+        - AwsvpcConfiguration:
+            SecurityGroups:
+              - "Fn::ImportValue": !Sub ${Environment}InternalAccessSecurityGroup
+            Subnets:
+              - "Fn::ImportValue": !Sub ${Environment}PrivateSubnet1
+              - "Fn::ImportValue": !Sub ${Environment}PrivateSubnet2
+        - !Ref AWS::NoValue
+
+  ListenerRuleForHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        "Fn::ImportValue": !Sub ${Environment}BackendAlbListenerForHttps
+      Priority: 2
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Sub "${DomainName}"
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: Service
+    Properties:
+      MaxCapacity: !Ref EcsTasksMax
+      MinCapacity: !Ref EcsTasksMin
+      ResourceId: !Sub service/${ClusterName}/${Service.Name}
+      RoleARN:
+        "Fn::ImportValue": !Sub ${ClusterName}ECSRoleArn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  EcsScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${ClusterName}_${TypeProject}__EcsScaleOut
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: !Ref EcsScaleOutRate
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalUpperBound: 0
+            ScalingAdjustment: !Ref EcsScaleOutAdjustment
+
+  EcsScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    DependsOn: EcsScaleOutPolicy
+    Properties:
+      PolicyName: !Sub ${ClusterName}_${TypeProject}__EcsScaleIn
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: !Ref EcsScaleInRate
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: !Ref EcsScaleInAdjustment
+
+Outputs:
+  EcsScaleOutPolicy:
+    Value: !Ref EcsScaleOutPolicy
+    Export:
+      Name: !Sub ${ClusterName}-${TypeProject}EcsScaleOut
+
+  EcsScaleInPolicy:
+    Value: !Ref EcsScaleInPolicy
+    Export:
+      Name: !Sub ${ClusterName}-${TypeProject}EcsScaleIn

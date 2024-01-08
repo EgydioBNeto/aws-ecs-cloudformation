@@ -1,0 +1,17 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sets ups ECR registry
+Parameters:
+  Environment:
+    Default: prod
+    Type: String
+
+  Owner:
+    Default: alpha
+    Type: String
+
+Resources:
+  ECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageTagMutability: MUTABLE
+      RepositoryName: !Sub ${Owner}-${Environment}-registry

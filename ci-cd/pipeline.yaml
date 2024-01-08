@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sets up CodePipeline
+
+Parameters:
+  Environment:
+    Default: prod
+    Type: String
+
+  Owner:
+    Default: egydio
+    Type: String
+
+  ProviderRepo:
+    Default: Egydio/example
+    Type: String
+
+  ProviderBranch:
+    Default: devops
+    Type: String
+
+  TypeProject:
+    Default: microservices
+    Type: String
+
+  CodestarConnectionArn:
+    Default: arn:aws:codestar-connections:us-east-1:012345678901:connection/abcdefghijklmnopqrstuvxyz1234567890
+    Type: String
+
+  Secrets:
+    Type: String
+    Default: prod/egydio/example
+
+Resources:
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      RoleName: !Sub cfn-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "cloudformation.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - iam:*
+                  - ssm:*
+                  - s3:*
+                  - codecommit:*
+                  - secretsmanager:*
+                  - ec2:*
+                  - ecs:*
+                  - ecr:*
+                  - cloudformation:*
+                  - route53:*
+                  - elasticloadbalancing:*
+                  - application-autoscaling:*
+                  - kms:*
+                  - codebuild:*
+                  - cloudwatch:*
+                  - events:*
+                  - codeartifact:*
+                  - sts:*
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cb-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "codebuild.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:*
+                  - s3:*
+                  - ssm:*
+                  - ecs:*
+                  - ecr:*
+                  - cloudformation:*
+                  - route53:*
+                  - elasticloadbalancing:*
+                  - iam:*
+                  - application-autoscaling:*
+                  - secretsmanager:*
+                  - kms:*
+                  - codecommit:*
+                  - codeartifact:*
+                  - sts:*
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cp-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "codepipeline.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - s3:*
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - cloudformation:*
+                  - cloudwatch:*
+                  - events:*
+                  - iam:PassRole
+                  - ec2:*
+                  - codecommit:*
+                  - codestar-connections:*
+                  - ecs:*
+                  - kms:*
+                  - secretsmanager:*
+                  - codeartifact:*
+                  - sts:*
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub ${Owner}-${Environment}-${TypeProject}-artifact-bucket
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${Owner}-${Environment}-${TypeProject}-codebuild
+      ServiceRole: !Ref CodeBuildServiceRole
+      Artifacts:
+        Location: !Ref ArtifactBucket
+        Type: "S3"
+      Source:
+        Location: !Sub ${ArtifactBucket}/source.zip
+        Type: "S3"
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo Install Started on `date`
+                - apt-get update
+                - echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                - curl -JLO https://github.com/docker/buildx/releases/download/v0.10.0/buildx-v0.10.0.linux-amd64
+                - mkdir -p ~/.docker/cli-plugins
+                - mv buildx-v0.10.0.linux-amd64 ~/.docker/cli-plugins/docker-buildx
+                - chmod a+rx ~/.docker/cli-plugins/docker-buildx
+                - docker run --privileged --rm tonistiigi/binfmt --install all
+                - echo docker buildx installed
+              finally:
+                - echo Install Finished on `date`
+            build:
+              commands:
+                - echo Build Started on `date`
+                - export IMAGE_TAG=$(date | md5sum | awk '{print $1}')
+                - docker build --build-arg CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain $AWS_OWNER --domain-owner $AWS_ID --region $AWS_REGION --query authorizationToken --output text) --build-arg MONGODB_PASS=$MONGODB_PASS --build-arg MONGODB_URI=$MONGODB_URI --build-arg MONGODB_USER=$MONGODB_USER -t $AWS_OWNER-$AWS_ENVIRONMENT-repository:$IMAGE_TAG .
+                - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+                - docker tag $AWS_OWNER-$AWS_ENVIRONMENT-repository:$IMAGE_TAG $AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$AWS_OWNER-$AWS_ENVIRONMENT-repository:$IMAGE_TAG
+                - docker push $AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$AWS_OWNER-$AWS_ENVIRONMENT-repository:$IMAGE_TAG
+                - echo Deploy Started on `date`
+                - aws s3 cp s3://$AWS_OWNER-$AWS_ENVIRONMENT-$TYPE_PROJECT-artifact-bucket/buildspec/svc-deploy.yaml .
+                - aws cloudformation deploy --template-file svc-deploy.yaml --stack-name $AWS_OWNER-$AWS_ENVIRONMENT-ecs-service --parameter-overrides DockerImageVersion=$IMAGE_TAG
+              finally:
+                - echo Build Finished on `date`
+      Environment:
+        ComputeType: "BUILD_GENERAL1_LARGE"
+        Image: "aws/codebuild/standard:5.0"
+        Type: "LINUX_CONTAINER"
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: DOCKER_PASSWORD
+            Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:DOCKER_PASSWORD}}"
+          - Name: DOCKER_USERNAME
+            Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:DOCKER_USERNAME}}"
+          - Name: MONGODB_DB
+            Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_DB}}"
+          - Name: MONGODB_URI
+            Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_URI}}"
+          - Name: MONGODB_USER
+            Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_USER}}"
+          - Name: MONGODB_PASS
+            Value: !Sub "{{resolve:secretsmanager:${Secrets}:SecretString:MONGODB_PASS}}"
+          - Name: AWS_REGION
+            Value: us-east-1
+          - Name: AWS_ENVIRONMENT
+            Value: !Sub ${Environment}
+          - Name: AWS_OWNER
+            Value: !Sub ${Owner}
+          - Name: TYPE_PROJECT
+            Value: !Sub ${TypeProject}
+          - Name: AWS_ID
+            Value: 542740459443
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${Owner}-${Environment}-${TypeProject}-pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: "1"
+                Provider: CodeStarSourceConnection
+              Configuration:
+                ConnectionArn: !Ref CodestarConnectionArn
+                FullRepositoryId: !Sub ${ProviderRepo}
+                BranchName: !Sub ${ProviderBranch}
+                DetectChanges: true
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+                PrimarySource: App
+              RunOrder: 2
+              InputArtifacts:
+                - Name: App
