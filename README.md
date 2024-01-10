@@ -17,11 +17,10 @@ This repository contains the AWS CloudFormation templates required to deploy an 
 5. VPC (Virtual Private Cloud)
 6. SM (Secrets Manager)
 7. CodeBuild
-8. CloudFormation Deploy
+8. CloudFormation to Deploy
 9. ECR (Elastic Container Registry)
 10. CodePipeline
 11. CodeStar Connections
-12. CodePipeline.
 
 ## Deployment Order
 
